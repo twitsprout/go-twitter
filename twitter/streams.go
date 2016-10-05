@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -50,12 +51,15 @@ type StreamFilterParams struct {
 
 // Filter returns messages that match one or more filter predicates.
 // https://dev.twitter.com/streaming/reference/post/statuses/filter
-func (srv *StreamService) Filter(params *StreamFilterParams) (*Stream, error) {
+func (srv *StreamService) Filter(ctx context.Context, params *StreamFilterParams) (*Stream, error) {
 	req, err := srv.public.New().Post("filter.json").QueryStruct(params).Request()
 	if err != nil {
 		return nil, err
 	}
-	return newStream(srv.client, req), nil
+	s := newStream(srv.client, req)
+	ctx, s.cancel = context.WithCancel(ctx)
+	req = req.WithContext(ctx)
+	return s, nil
 }
 
 // StreamSampleParams are the parameters for StreamService.Sample.
@@ -146,7 +150,7 @@ type Stream struct {
 	Messages chan interface{}
 	done     chan struct{}
 	group    *sync.WaitGroup
-	body     io.Closer
+	cancel   context.CancelFunc
 }
 
 // newStream creates a Stream and starts a goroutine to retry connecting and
@@ -171,9 +175,7 @@ func (s *Stream) Stop() {
 	// Scanner does not have a Stop() or take a done channel, so for low volume
 	// streams Scan() blocks until the next keep-alive. Close the resp.Body to
 	// escape and stop the stream in a timely fashion.
-	if s.body != nil {
-		s.body.Close()
-	}
+	s.cancel()
 	// block until the retry goroutine stops
 	s.group.Wait()
 }
@@ -195,9 +197,6 @@ func (s *Stream) retry(req *http.Request, expBackOff backoff.BackOff, aggExpBack
 			s.Messages <- err
 			return
 		}
-		// when err is nil, resp contains a non-nil Body which must be closed
-		defer resp.Body.Close()
-		s.body = resp.Body
 		switch resp.StatusCode {
 		case 200:
 			// receive stream response Body, handles closing
